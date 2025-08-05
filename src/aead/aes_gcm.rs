@@ -311,7 +311,7 @@ fn seal(
 
             let mut tag = [0u8; TAG_LEN];
             let ret = esp_aes_gcm_crypt_and_tag(
-                &ctx as *const _ as *mut _,
+                &ctx.0 as *const _ as *mut _,
                 MBEDTLS_GCM_ENCRYPT as _,
                 in_out.len(),
                 raw_nonce.as_ptr(),

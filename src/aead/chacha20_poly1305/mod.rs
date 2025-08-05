@@ -153,6 +153,7 @@ fn open(
     open_fallback(key, nonce, aad, in_out, cpu)
 }
 
+#[cfg(not(target_os = "espidf"))]
 pub(super) fn open_fallback(
     Key(chacha20_key): &Key,
     nonce: Nonce,
@@ -168,6 +169,57 @@ pub(super) fn open_fallback(
     let in_out_len = in_out.len();
     chacha20_key.encrypt(counter, in_out, cpu);
     Ok(finish(auth, aad.as_ref().len(), in_out_len))
+}
+
+#[cfg(target_os = "espidf")]
+pub(super) fn open_fallback(
+    Key(chacha20_key): &Key,
+    nonce: Nonce,
+    aad: Aad<&[u8]>,
+    in_out: Overlapping<'_>,
+    cpu: cpu::Features,
+) -> Result<Tag, InputTooLongError> {
+    use super::TAG_LEN;
+    use esp_idf_sys::mbedtls_chachapoly_context;
+
+    let mut tag = [0u8; TAG_LEN];
+    let raw_nonce = *nonce.as_ref();
+
+    // since there is no access to chachapoly_crypt_and_tag (its not exported/marked as static)
+    // we need to do same things as it does internally
+
+    unsafe {
+        let ctx = &chacha20_key.ctx.0 as *const mbedtls_chachapoly_context as *mut mbedtls_chachapoly_context;
+
+        let ret = esp_idf_sys::mbedtls_chachapoly_starts(
+            ctx,
+            raw_nonce.as_ptr(),
+            esp_idf_sys::mbedtls_chachapoly_mode_t_MBEDTLS_CHACHAPOLY_DECRYPT,
+        );
+        if ret != 0 { return Err(InputTooLongError::new(0)); }
+
+        let ret = esp_idf_sys::mbedtls_chachapoly_update_aad(
+            ctx,
+            aad.0.as_ptr(),
+            aad.0.len(),
+        );
+        if ret != 0 { return Err(InputTooLongError::new(0)); }
+        
+        // input and output cannot overlap
+        let input = alloc::vec::Vec::from(in_out.input());
+        let ret = esp_idf_sys::mbedtls_chachapoly_update(
+            ctx,
+            in_out.len(),
+            input.as_ptr(),
+            in_out.input().as_ptr() as *mut u8,
+        );
+        if ret != 0 { return Err(InputTooLongError::new(0)); }
+
+        let ret = esp_idf_sys::mbedtls_chachapoly_finish(ctx, tag.as_mut_ptr());
+        if ret != 0 { return Err(InputTooLongError::new(0)); }
+    }
+
+    Ok(tag.into())
 }
 
 fn check_input_lengths(aad: Aad<&[u8]>, input: &[u8]) -> Result<(), InputTooLongError> {

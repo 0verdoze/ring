@@ -199,10 +199,25 @@ impl DynKey {
         inline(never)
     )]
     fn new_fallback(key: aes::KeyBytes) -> Self {
+        #[cfg(target_os = "espidf")]
+        let raw_key = match key {
+            aes::KeyBytes::AES_128(raw_key) => *raw_key,
+            _ => unimplamented!("only AES_128 is implemented on ESP32")
+        };
+
         let aes_key = aes::fallback::Key::new(key);
         let gcm_key_value = derive_gcm_key_value(&aes_key);
         let gcm_key = gcm::fallback::Key::new(gcm_key_value);
-        Self::Fallback(Combo { aes_key, gcm_key })
+
+        #[cfg(target_os = "espidf")]
+        {
+            Self::Fallback(Combo { aes_key, gcm_key, raw_key })
+        }
+
+        #[cfg(not(target_os = "espidf"))]
+        {
+            Self::Fallback(Combo { aes_key, gcm_key })
+        }
     }
 }
 
@@ -218,6 +233,7 @@ fn seal(
     aad: Aad<&[u8]>,
     in_out: &mut [u8],
 ) -> Result<Tag, InputTooLongError> {
+    let raw_nonce = *nonce.as_ref();
     let mut ctr = Counter::one(nonce);
     let tag_iv = ctr.increment();
 
@@ -297,7 +313,7 @@ fn seal_strided<
     A: aes::EncryptBlock + aes::EncryptCtr32,
     G: gcm::UpdateBlock + gcm::UpdateBlocks,
 >(
-    Combo { aes_key, gcm_key }: &Combo<A, G>,
+    Combo { aes_key, gcm_key, .. }: &Combo<A, G>,
     aad: Aad<&[u8]>,
     in_out: &mut [u8],
     mut ctr: Counter,
@@ -456,7 +472,7 @@ fn open_strided<
     A: aes::EncryptBlock + aes::EncryptCtr32,
     G: gcm::UpdateBlock + gcm::UpdateBlocks,
 >(
-    Combo { aes_key, gcm_key }: &Combo<A, G>,
+    Combo { aes_key, gcm_key, .. }: &Combo<A, G>,
     aad: Aad<&[u8]>,
     mut in_out: Overlapping<'_>,
     mut ctr: Counter,
@@ -531,3 +547,6 @@ pub(super) struct Combo<Aes, Gcm> {
     pub(super) aes_key: Aes,
     pub(super) gcm_key: Gcm,
 }
+
+unsafe impl<Aes, Gcm> Send for Combo<Aes, Gcm> {}
+unsafe impl<Aes, Gcm> Sync for Combo<Aes, Gcm> {}

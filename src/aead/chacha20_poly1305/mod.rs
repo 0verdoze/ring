@@ -196,22 +196,24 @@ pub(super) fn open_fallback(
             raw_nonce.as_ptr(),
             esp_idf_sys::mbedtls_chachapoly_mode_t_MBEDTLS_CHACHAPOLY_DECRYPT,
         );
-        if ret != 0 { return Err(InputTooLongError::new(0)); }
+        if ret != 0 {
+            panic!("`mbedtls_chachapoly_starts` failed");
+        }
 
         let ret = esp_idf_sys::mbedtls_chachapoly_update_aad(
             ctx,
             aad.0.as_ptr(),
             aad.0.len(),
         );
-        if ret != 0 { return Err(InputTooLongError::new(0)); }
+        if ret != 0 {
+            panic!("`mbedtls_chachapoly_update_aad` failed");
+        }
 
         // input and output cannot overlap
         // vec can return OOM which will result in crash, alloca can technically also corrupt stack
         // but all encryptions happen in UDP packets, which is at most MTU, so lets say 1500 bytes
         // so its totally safe
         let ret = alloca::with_alloca(in_out.input().len(), |uninit| unsafe {
-            use core::mem::MaybeUninit;
-
             let len = uninit.len();
             // initialize alloca buffer
             core::ptr::copy_nonoverlapping(in_out.input().as_ptr(), uninit.as_mut_ptr() as *mut u8, len);
@@ -224,10 +226,14 @@ pub(super) fn open_fallback(
             )
         });
 
-        if ret != 0 { return Err(InputTooLongError::new(0)); }
+        if ret != 0 {
+            panic!("`mbedtls_chachapoly_update` failed");
+        }
 
         let ret = esp_idf_sys::mbedtls_chachapoly_finish(ctx, tag.as_mut_ptr());
-        if ret != 0 { return Err(InputTooLongError::new(0)); }
+        if ret != 0 {
+            panic!("`mbedtls_chachapoly_finish` failed");
+        }
     }
 
     Ok(tag.into())

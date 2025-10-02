@@ -51,7 +51,47 @@ pub(super) struct MbedtlsAesGcmContextWrapper(pub esp_idf_sys::mbedtls_gcm_conte
 
 impl Key {
     pub(super) fn new(key: aes::KeyBytes, cpu_features: cpu::Features) -> Self {
-        Self(DynKey::new(key, cpu_features))
+        #[cfg(target_os = "espidf")]
+        let mbedtls_ctx = {            
+            use esp_idf_sys::{
+                mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES,
+                mbedtls_gcm_context,
+            };
+
+            // extract key
+            let raw_key = match key {
+                aes::KeyBytes::AES_128(raw_key) => *raw_key,
+                _ => unimplemented!("only AES_128 is implemented on ESP32")
+            };
+
+            // init ctx
+            let mut mbedtls_ctx = mbedtls_gcm_context::default();
+            // SAFETY: mbedtls_ctx is a valid pointer
+            unsafe { esp_aes_gcm_init(&mut mbedtls_ctx) };
+
+            // set key
+            // SAFETY: mbedtls_ctx is a valid pointer
+            let ret = unsafe {
+                esp_aes_gcm_setkey(
+                    &mut mbedtls_ctx,
+                    mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES, // AES cipher id (usually 1)
+                    raw_key.as_ptr(),
+                    128, // key length in bits
+                )
+            };
+
+            if ret != 0 {
+                panic!("`esp_aes_gcm_setkey` failed")
+            }
+
+            alloc::sync::Arc::new(MbedtlsAesGcmContextWrapper(mbedtls_ctx))
+        };
+
+        Self(
+            DynKey::new(key, cpu_features),
+            #[cfg(target_os = "espidf")]
+            mbedtls_ctx,
+        )
     }
 
     #[inline(never)]
@@ -206,45 +246,11 @@ impl DynKey {
         inline(never)
     )]
     fn new_fallback(key: aes::KeyBytes) -> Self {
-        #[cfg(target_os = "espidf")]
-        let raw_key = match key {
-            aes::KeyBytes::AES_128(raw_key) => *raw_key,
-            _ => unimplemented!("only AES_128 is implemented on ESP32")
-        };
-
         let aes_key = aes::fallback::Key::new(key);
         let gcm_key_value = derive_gcm_key_value(&aes_key);
         let gcm_key = gcm::fallback::Key::new(gcm_key_value);
 
-        #[cfg(target_os = "espidf")]
-        unsafe {
-            use esp_idf_sys::{
-                mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES,
-                mbedtls_gcm_context,
-            };
-
-            let mut mbedtls_ctx = mbedtls_gcm_context::default();
-
-            esp_aes_gcm_init(&mut mbedtls_ctx);
-
-            let ret = esp_aes_gcm_setkey(
-                &mut mbedtls_ctx,
-                mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES, // AES cipher id (usually 1)
-                raw_key.as_ptr(),
-                128, // key length in bits
-            );
-
-            if ret != 0 {
-                panic!("`esp_aes_gcm_setkey` failed")
-            }
-
-            Self::Fallback(Combo { aes_key, gcm_key, mbedtls_ctx })
-        }
-
-        #[cfg(not(target_os = "espidf"))]
-        {
-            Self::Fallback(Combo { aes_key, gcm_key })
-        }
+        Self::Fallback(Combo { aes_key, gcm_key })
     }
 }
 
@@ -417,7 +423,7 @@ fn seal_finish<A: aes::EncryptBlock, G: gcm::UpdateBlock>(
 }
 
 fn open(
-    Key(key, ..): &Key,
+    key: &Key,
     nonce: Nonce,
     aad: Aad<&[u8]>,
     in_out: Overlapping<'_>,

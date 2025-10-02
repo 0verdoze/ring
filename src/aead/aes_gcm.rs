@@ -265,10 +265,10 @@ fn seal(
     let tag_iv = ctr.increment();
 
     #[cfg(target_os = "espidf")]
-    let Key(dyn_key, ctx) = key;
+    let Key(dyn_key, ctx, ..) = key;
 
     #[cfg(not(target_os = "espidf"))]
-    let Key(dyn_key) = key;
+    let Key(dyn_key, ..) = key;
 
     match dyn_key {
         #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
@@ -422,10 +422,17 @@ fn open(
     aad: Aad<&[u8]>,
     in_out: Overlapping<'_>,
 ) -> Result<Tag, InputTooLongError> {
+    let raw_nonce = *nonce.as_ref();
     let mut ctr = Counter::one(nonce);
     let tag_iv = ctr.increment();
 
-    match key {
+    #[cfg(target_os = "espidf")]
+    let Key(dyn_key, ctx, ..) = key;
+
+    #[cfg(not(target_os = "espidf"))]
+    let Key(dyn_key, ..) = key;
+
+    match dyn_key {
         #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         DynKey::AesHwClMul(c) => {
             open_whole_partial(c, aad, in_out, ctr, tag_iv, aarch64::open_whole)
@@ -457,6 +464,41 @@ fn open(
         ))]
         DynKey::Simd(c) => open_strided(c, aad, in_out, ctr, tag_iv),
 
+        #[cfg(target_os = "espidf")]
+        DynKey::Fallback(Combo { .. }) => {
+            use crate::aead::{TAG_LEN, NONCE_LEN};
+            use esp_idf_sys::{
+                MBEDTLS_GCM_DECRYPT,
+            };
+
+            let mut tag = [0u8; TAG_LEN];
+            // for decryption, input and output must be different buffers
+            let input = alloc::vec::Vec::from(in_out.input());
+
+            let ret = in_out.with_input_output_len(|_input, output, len| unsafe {
+                esp_aes_gcm_crypt_and_tag(
+                    &ctx.0 as *const _ as *mut _,
+                    MBEDTLS_GCM_DECRYPT as _,
+                    len as _,
+                    raw_nonce.as_ptr(),
+                    NONCE_LEN,
+                    aad.0.as_ptr(),
+                    aad.0.len(),
+                    input.as_ptr(),
+                    output,
+                    TAG_LEN,
+                    tag.as_mut_ptr(),
+                )
+            });
+
+            if ret != 0 {
+                panic!("`esp_aes_gcm_crypt_and_tag` failed");
+            }
+
+            Ok(tag.into())
+        },
+
+        #[cfg(not(target_os = "espidf"))]
         DynKey::Fallback(c) => open_strided(c, aad, in_out, ctr, tag_iv),
     }
 }

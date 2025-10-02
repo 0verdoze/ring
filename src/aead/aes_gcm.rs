@@ -210,8 +210,30 @@ impl DynKey {
         let gcm_key = gcm::fallback::Key::new(gcm_key_value);
 
         #[cfg(target_os = "espidf")]
-        {
-            Self::Fallback(Combo { aes_key, gcm_key, raw_key })
+        unsafe {
+            use esp_idf_sys::{
+                mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES,
+                mbedtls_gcm_context,
+                esp_aes_gcm_init,
+                esp_aes_gcm_setkey,
+            };
+
+            let mut mbedtls_ctx = mbedtls_gcm_context::default();
+
+            esp_aes_gcm_init(&mut mbedtls_ctx);
+
+            let ret = esp_aes_gcm_setkey(
+                &mut mbedtls_ctx,
+                mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES, // AES cipher id (usually 1)
+                raw_key.as_ptr(),
+                128, // key length in bits
+            );
+
+            if ret != 0 {
+                panic!("`esp_aes_gcm_setkey` failed")
+            }
+
+            Self::Fallback(Combo { aes_key, gcm_key, mbedtls_ctx })
         }
 
         #[cfg(not(target_os = "espidf"))]
@@ -269,6 +291,37 @@ fn seal(
         ))]
         DynKey::Simd(c) => seal_strided(c, aad, in_out, ctr, tag_iv),
 
+        #[cfg(target_os = "espidf")]
+        DynKey::Fallback(Combo { mbedtls_ctx, .. }) => unsafe {
+            use crate::aead::{TAG_LEN, NONCE_LEN};
+            use esp_idf_sys::{
+                MBEDTLS_GCM_ENCRYPT,
+                esp_aes_gcm_crypt_and_tag,
+            };
+
+            let mut tag = [0u8; TAG_LEN];
+            let ret = esp_aes_gcm_crypt_and_tag(
+                mbedtls_ctx as *const _ as *mut _,
+                MBEDTLS_GCM_ENCRYPT as _,
+                in_out.len(),
+                raw_nonce.as_ptr(),
+                NONCE_LEN,
+                aad.0.as_ptr(),
+                aad.0.len(),
+                in_out.as_ptr(),
+                in_out.as_mut_ptr(),
+                TAG_LEN,
+                tag.as_mut_ptr(),
+            );
+
+            if ret != 0 {
+                panic!("`esp_aes_gcm_crypt_and_tag` failed");
+            }
+
+            Ok(tag.into())
+        },
+
+        #[cfg(not(target_os = "espidf"))]
         DynKey::Fallback(c) => seal_strided(c, aad, in_out, ctr, tag_iv),
     }
 }
@@ -546,6 +599,8 @@ const _MAX_INPUT_LEN_BOUNDED_BY_NIST: () =
 pub(super) struct Combo<Aes, Gcm> {
     pub(super) aes_key: Aes,
     pub(super) gcm_key: Gcm,
+    #[cfg(target_os = "espidf")]
+    pub(super) mbedtls_ctx: esp_idf_sys::mbedtls_gcm_context,
 }
 
 unsafe impl<Aes, Gcm> Send for Combo<Aes, Gcm> {}

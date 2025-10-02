@@ -40,7 +40,14 @@ mod aeshwclmulmovbe;
 mod vaesclmulavx2;
 
 #[derive(Clone)]
-pub(super) struct Key(DynKey);
+pub(super) struct Key(
+    DynKey,
+    #[cfg(target_os = "espidf")]
+    alloc::sync::Arc<MbedtlsAesGcmContextWrapper>,
+);
+
+#[cfg(target_os = "espidf")]
+pub(super) struct MbedtlsAesGcmContextWrapper(pub esp_idf_sys::mbedtls_gcm_context);
 
 impl Key {
     pub(super) fn new(key: aes::KeyBytes, cpu_features: cpu::Features) -> Self {
@@ -202,7 +209,7 @@ impl DynKey {
         #[cfg(target_os = "espidf")]
         let raw_key = match key {
             aes::KeyBytes::AES_128(raw_key) => *raw_key,
-            _ => unimplamented!("only AES_128 is implemented on ESP32")
+            _ => unimplemented!("only AES_128 is implemented on ESP32")
         };
 
         let aes_key = aes::fallback::Key::new(key);
@@ -248,7 +255,7 @@ fn derive_gcm_key_value(aes_key: &impl aes::EncryptBlock) -> gcm::KeyValue {
 const CHUNK_BLOCKS: usize = 3 * 1024 / 16;
 
 fn seal(
-    Key(key): &Key,
+    key: &Key,
     nonce: Nonce,
     aad: Aad<&[u8]>,
     in_out: &mut [u8],
@@ -257,7 +264,13 @@ fn seal(
     let mut ctr = Counter::one(nonce);
     let tag_iv = ctr.increment();
 
-    match key {
+    #[cfg(target_os = "espidf")]
+    let Key(dyn_key, ctx) = key;
+
+    #[cfg(not(target_os = "espidf"))]
+    let Key(dyn_key) = key;
+
+    match dyn_key {
         #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         DynKey::AesHwClMul(c) => {
             seal_whole_partial(c, aad, in_out, ctr, tag_iv, aarch64::seal_whole)
@@ -290,7 +303,7 @@ fn seal(
         DynKey::Simd(c) => seal_strided(c, aad, in_out, ctr, tag_iv),
 
         #[cfg(target_os = "espidf")]
-        DynKey::Fallback(Combo { mbedtls_ctx, .. }) => unsafe {
+        DynKey::Fallback(Combo { .. }) => unsafe {
             use crate::aead::{TAG_LEN, NONCE_LEN};
             use esp_idf_sys::{
                 MBEDTLS_GCM_ENCRYPT,
@@ -298,7 +311,7 @@ fn seal(
 
             let mut tag = [0u8; TAG_LEN];
             let ret = esp_aes_gcm_crypt_and_tag(
-                mbedtls_ctx as *const _ as *mut _,
+                &ctx as *const _ as *mut _,
                 MBEDTLS_GCM_ENCRYPT as _,
                 in_out.len(),
                 raw_nonce.as_ptr(),
@@ -404,7 +417,7 @@ fn seal_finish<A: aes::EncryptBlock, G: gcm::UpdateBlock>(
 }
 
 fn open(
-    Key(key): &Key,
+    Key(key, ..): &Key,
     nonce: Nonce,
     aad: Aad<&[u8]>,
     in_out: Overlapping<'_>,
@@ -596,12 +609,21 @@ const _MAX_INPUT_LEN_BOUNDED_BY_NIST: () =
 pub(super) struct Combo<Aes, Gcm> {
     pub(super) aes_key: Aes,
     pub(super) gcm_key: Gcm,
-    #[cfg(target_os = "espidf")]
-    pub(super) mbedtls_ctx: esp_idf_sys::mbedtls_gcm_context,
 }
 
-unsafe impl<Aes, Gcm> Send for Combo<Aes, Gcm> {}
-unsafe impl<Aes, Gcm> Sync for Combo<Aes, Gcm> {}
+#[cfg(target_os = "espidf")]
+impl Drop for MbedtlsAesGcmContextWrapper {
+    fn drop(&mut self) {
+        unsafe {
+            esp_aes_gcm_free(&mut self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "espidf")]
+unsafe impl Send for MbedtlsAesGcmContextWrapper {}
+#[cfg(target_os = "espidf")]
+unsafe impl Sync for MbedtlsAesGcmContextWrapper {}
 
 #[cfg(target_os = "espidf")]
 extern "C" {

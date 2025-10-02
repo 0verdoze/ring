@@ -214,8 +214,6 @@ impl DynKey {
             use esp_idf_sys::{
                 mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES,
                 mbedtls_gcm_context,
-                esp_aes_gcm_init,
-                esp_aes_gcm_setkey,
             };
 
             let mut mbedtls_ctx = mbedtls_gcm_context::default();
@@ -296,7 +294,6 @@ fn seal(
             use crate::aead::{TAG_LEN, NONCE_LEN};
             use esp_idf_sys::{
                 MBEDTLS_GCM_ENCRYPT,
-                esp_aes_gcm_crypt_and_tag,
             };
 
             let mut tag = [0u8; TAG_LEN];
@@ -605,3 +602,33 @@ pub(super) struct Combo<Aes, Gcm> {
 
 unsafe impl<Aes, Gcm> Send for Combo<Aes, Gcm> {}
 unsafe impl<Aes, Gcm> Sync for Combo<Aes, Gcm> {}
+
+#[cfg(target_os = "espidf")]
+extern "C" {
+    pub fn esp_aes_gcm_init(
+        ctx: *mut esp_idf_sys::mbedtls_gcm_context,
+    );
+
+    pub fn esp_aes_gcm_free(ctx: *mut esp_idf_sys::mbedtls_gcm_context);
+
+    pub fn esp_aes_gcm_setkey(
+        ctx: *mut esp_idf_sys::mbedtls_gcm_context,
+        cipher: u32,
+        key: *const u8,
+        keybits: u32,
+    ) -> i32;
+
+    pub fn esp_aes_gcm_crypt_and_tag(
+        ctx: *mut esp_idf_sys::mbedtls_gcm_context,
+        mode: i32,
+        length: usize,
+        iv: *const u8,
+        iv_len: usize,
+        add: *const u8,
+        add_len: usize,
+        input: *const u8,
+        output: *mut u8,
+        tag_len: usize,
+        tag: *mut u8,
+    ) -> i32;
+}

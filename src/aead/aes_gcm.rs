@@ -472,23 +472,29 @@ fn open(
             };
 
             let mut tag = [0u8; TAG_LEN];
-            // for decryption, input and output must be different buffers
-            let input = alloc::vec::Vec::from(in_out.input());
+            let ret = in_out.with_input_output_len(|input, output, len| {
+                // input and output cannot overlap
+                // vec can return OOM which will result in crash, alloca can technically also corrupt stack
+                // but all encryptions happen in UDP packets, which is at most MTU, so lets say 1500 bytes
+                // so its totally safe
+                alloca::with_alloca(len, |uninit| unsafe {
+                    // initialize alloca buffer
+                    core::ptr::copy_nonoverlapping(input, uninit.as_mut_ptr() as *mut u8, len);
 
-            let ret = in_out.with_input_output_len(|_input, output, len| unsafe {
-                esp_aes_gcm_crypt_and_tag(
-                    &ctx.0 as *const _ as *mut _,
-                    MBEDTLS_GCM_DECRYPT as _,
-                    len as _,
-                    raw_nonce.as_ptr(),
-                    NONCE_LEN,
-                    aad.0.as_ptr(),
-                    aad.0.len(),
-                    input.as_ptr(),
-                    output,
-                    TAG_LEN,
-                    tag.as_mut_ptr(),
-                )
+                    esp_aes_gcm_crypt_and_tag(
+                        &ctx.0 as *const _ as *mut _,
+                        MBEDTLS_GCM_DECRYPT as _,
+                        len as _,
+                        raw_nonce.as_ptr(),
+                        NONCE_LEN,
+                        aad.0.as_ptr(),
+                        aad.0.len(),
+                        uninit.as_ptr() as *const u8,
+                        output,
+                        TAG_LEN,
+                        tag.as_mut_ptr(),
+                    )
+                })
             });
 
             if ret != 0 {

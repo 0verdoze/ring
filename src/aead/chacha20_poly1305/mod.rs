@@ -85,6 +85,7 @@ impl Key {
     }
 }
 
+#[cfg(not(target_os = "espidf"))]
 pub(super) fn seal_fallback(
     Key(chacha20_key): &Key,
     nonce: Nonce,
@@ -99,6 +100,39 @@ pub(super) fn seal_fallback(
     chacha20_key.encrypt(counter, in_out.into(), cpu);
     poly1305_update_padded_16(&mut auth, in_out);
     Ok(finish(auth, aad.as_ref().len(), in_out.len()))
+}
+
+#[cfg(target_os = "espidf")]
+pub(super) fn seal_fallback(
+    Key(chacha20_key): &Key,
+    nonce: Nonce,
+    aad: Aad<&[u8]>,
+    in_out: &mut [u8],
+    _cpu: cpu::Features,
+) -> Result<Tag, InputTooLongError> {
+    use super::TAG_LEN;
+
+    let mut tag = [0u8; TAG_LEN];
+    let raw_nonce = *nonce.as_ref();
+
+    let ret = unsafe {
+        esp_idf_sys::mbedtls_chachapoly_encrypt_and_tag(
+            &chacha20_key.ctx.0 as *const _ as *mut _,
+            in_out.len(),
+            raw_nonce.as_ptr(),
+            aad.0.as_ptr(),
+            aad.0.len(),
+            in_out.as_ptr(),
+            in_out.as_mut_ptr(),
+            tag.as_mut_ptr(),
+        )
+    };
+
+    if ret != 0 {
+        panic!("`mbedtls_chachapoly_encrypt_and_tag` failed");
+    }
+
+    Ok(tag.into())
 }
 
 fn open(

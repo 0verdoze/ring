@@ -15,6 +15,7 @@
 
 use super::{overlapping, quic::Sample, Nonce};
 use crate::cpu;
+use alloc::sync::Arc;
 use cfg_if::cfg_if;
 
 cfg_if! {
@@ -40,12 +41,30 @@ pub type Overlapping<'o> = overlapping::Overlapping<'o, u8>;
 #[derive(Clone)]
 pub struct Key {
     words: [u32; KEY_LEN / 4],
+    #[cfg(target_os = "espidf")]
+    pub ctx: Arc<MbedtlsChaChaPolyContextWrapper>,
 }
+
+#[cfg(target_os = "espidf")]
+#[derive(Clone)]
+pub struct MbedtlsChaChaPolyContextWrapper(pub esp_idf_sys::mbedtls_chachapoly_context);
 
 impl Key {
     pub(super) fn new(value: [u8; KEY_LEN]) -> Self {
+        #[cfg(target_os = "espidf")]
+        let ctx = unsafe {
+            let mut ctx = esp_idf_sys::mbedtls_chachapoly_context::default();
+            esp_idf_sys::mbedtls_chachapoly_init(&mut ctx);
+            let res = esp_idf_sys::mbedtls_chachapoly_setkey(&mut ctx, value.as_ptr());
+
+            assert!(res == 0);
+            ctx
+        };
+
         Self {
             words: value.array_split_map(u32::from_le_bytes),
+            #[cfg(target_os = "espidf")]
+            ctx: Arc::new(MbedtlsChaChaPolyContextWrapper(ctx)),
         }
     }
 }
@@ -157,6 +176,20 @@ impl Key {
     #[inline]
     pub(super) fn words_less_safe(&self) -> &[u32; KEY_LEN / 4] {
         &self.words
+    }
+}
+
+#[cfg(target_os = "espidf")]
+unsafe impl Send for MbedtlsChaChaPolyContextWrapper {}
+#[cfg(target_os = "espidf")]
+unsafe impl Sync for MbedtlsChaChaPolyContextWrapper {}
+
+#[cfg(target_os = "espidf")]
+impl Drop for MbedtlsChaChaPolyContextWrapper {
+    fn drop(&mut self) {
+        unsafe {
+            esp_idf_sys::mbedtls_chachapoly_free(&mut self.0);
+        }
     }
 }
 
